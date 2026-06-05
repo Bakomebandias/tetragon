@@ -31,6 +31,7 @@ package program
 import (
 	"fmt"
 	"maps"
+	"os"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -87,7 +88,7 @@ type MultiKprobeAttachData struct {
 }
 
 type UprobeAttachData struct {
-	Path         string
+	File         *os.File
 	Symbol       string
 	Address      uint64
 	Offset       uint64
@@ -103,8 +104,8 @@ type MultiUprobeAttachSymbolsCookies struct {
 }
 
 type MultiUprobeAttachData struct {
-	// Path -> []{Symbol,Cookie}
-	Attach map[string]*MultiUprobeAttachSymbolsCookies
+	// *os.File -> []{Symbol,Cookie}
+	Attach map[*os.File]*MultiUprobeAttachSymbolsCookies
 }
 
 // Program reprents a BPF program.

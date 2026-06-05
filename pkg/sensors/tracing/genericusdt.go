@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path"
 
 	"github.com/cilium/ebpf"
@@ -54,7 +55,7 @@ var (
 type genericUsdt struct {
 	tableId idtable.EntryID
 	config  *api.EventConfig
-	path    string
+	file    *os.File
 	target  *elf.UsdtTarget
 	// policyName is the name of the policy that this uprobe belongs to
 	policyName string
@@ -75,7 +76,7 @@ func (g *genericUsdt) SetID(id idtable.EntryID) {
 func (g *genericUsdt) LogAttrs(level slog.Level, msg string, attrs ...slog.Attr) {
 	attrs = append(attrs,
 		slog.Attr{Key: "policy_name", Value: slog.StringValue(g.policyName)},
-		slog.Attr{Key: "path", Value: slog.StringValue(g.path)},
+		slog.Attr{Key: "path", Value: slog.StringValue(g.file.Name())},
 	)
 	logger.GetLogger().LogAttrs(context.Background(), level, msg, attrs...)
 }
@@ -119,6 +120,10 @@ func cleanupUsdtEntries(ids []idtable.EntryID) error {
 			errs = errors.Join(errs, err)
 		}
 
+		if err := usdtEntry.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			errs = errors.Join(errs, err)
+		}
+
 		_, err = usdtTable.RemoveEntry(id)
 		if err != nil {
 			errs = errors.Join(errs, err)
@@ -140,6 +145,7 @@ func createGenericUsdtSensor(
 		err   error
 		has   usdtHas
 	)
+	openedFiles := make(map[string]*os.File)
 
 	in := addUsdtIn{
 		sensorPath: name,
@@ -158,10 +164,26 @@ func createGenericUsdtSensor(
 			return nil, err
 		}
 
-		nextIDs, addErr := addUsdt(&usdt, &in, ids, &has)
+		entryFile, ok := openedFiles[usdt.Path]
+		if !ok {
+			entryFile, err = os.Open(usdt.Path)
+			if err != nil {
+				if cleanupErr := cleanupUsdtEntries(ids); cleanupErr != nil {
+					err = errors.Join(err, cleanupErr)
+				}
+				return nil, err
+			}
+			openedFiles[usdt.Path] = entryFile
+		}
+
+		nextIDs, addErr := addUsdt(&usdt, entryFile, &in, ids, &has)
 		if addErr != nil {
 			if cleanupErr := cleanupUsdtEntries(ids); cleanupErr != nil {
 				addErr = errors.Join(addErr, cleanupErr)
+			}
+
+			if err := entryFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				addErr = errors.Join(addErr, err)
 			}
 			return nil, addErr
 		}
@@ -201,6 +223,20 @@ func createGenericUsdtSensor(
 		Namespace: polInfo.namespace,
 		DestroyHook: func() error {
 			return cleanupUsdtEntries(ids)
+		},
+		PostLoadHook: func() error {
+			var errs error
+			for _, id := range ids {
+				usdtEntry, err := genericUsdtTableGet(id)
+				if err != nil {
+					errs = errors.Join(errs, err)
+					continue
+				}
+				if err = usdtEntry.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+					errs = errors.Join(errs, fmt.Errorf("problem closing path %q: %w", usdtEntry.file.Name(), err))
+				}
+			}
+			return errs
 		},
 	}, nil
 }
@@ -281,14 +317,14 @@ func createUsdtSensorFromEntry(polInfo *policyInfo, usdtEntry *genericUsdt,
 	loadProgName := config.GenericUsdtObjs(false)
 
 	attachData := &program.UprobeAttachData{
-		Path:         usdtEntry.path,
+		File:         usdtEntry.file,
 		Address:      usdtEntry.target.IpRel,
 		RefCtrOffset: usdtEntry.target.SemaOff,
 	}
 
 	load := program.Builder(
 		path.Join(option.Config.HubbleLib, loadProgName),
-		fmt.Sprintf("%s %s %s", usdtEntry.path, usdtEntry.target.Spec.Provider, usdtEntry.target.Spec.Name),
+		fmt.Sprintf("%s %s %s", usdtEntry.file.Name(), usdtEntry.target.Spec.Provider, usdtEntry.target.Spec.Name),
 		"uprobe/generic_usdt",
 		fmt.Sprintf("%s_%s_%d", usdtEntry.target.Spec.Provider, usdtEntry.target.Spec.Name, usdtEntry.tableId.ID),
 		"generic_usdt").
@@ -331,7 +367,7 @@ func createUsdtSensorFromEntry(polInfo *policyInfo, usdtEntry *genericUsdt,
 	return progs, maps
 }
 
-func addUsdt(spec *v1alpha1.UsdtSpec, in *addUsdtIn, ids []idtable.EntryID, has *usdtHas) (retIDs []idtable.EntryID, retErr error) {
+func addUsdt(spec *v1alpha1.UsdtSpec, entryFile *os.File, in *addUsdtIn, ids []idtable.EntryID, has *usdtHas) (retIDs []idtable.EntryID, retErr error) {
 	var state *selectors.KernelSelectorState
 
 	baseLen := len(ids)
@@ -355,7 +391,7 @@ func addUsdt(spec *v1alpha1.UsdtSpec, in *addUsdtIn, ids []idtable.EntryID, has 
 		}
 	}()
 
-	se, err := elf.OpenSafeELFFile(spec.Path)
+	se, err := elf.NewSafeELFFile(entryFile)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +535,7 @@ func addUsdt(spec *v1alpha1.UsdtSpec, in *addUsdtIn, ids []idtable.EntryID, has 
 		usdtEntry := &genericUsdt{
 			tableId:     idtable.UninitializedEntryID,
 			config:      config,
-			path:        spec.Path,
+			file:        entryFile,
 			target:      target,
 			policyName:  in.policyName,
 			argPrinters: argPrinters,
@@ -571,14 +607,14 @@ func loadSingleUsdtSensor(usdtEntry *genericUsdt, args sensors.LoadProbeArgs) er
 	}
 
 	logger.GetLogger().Info(fmt.Sprintf("Loaded generic usdt sensor: %s -> %s [%s/%s]",
-		args.Load.Name, usdtEntry.path, usdtEntry.target.Spec.Provider, usdtEntry.target.Spec.Name))
+		args.Load.Name, usdtEntry.file.Name(), usdtEntry.target.Spec.Provider, usdtEntry.target.Spec.Name))
 	return nil
 }
 
 func loadMultiUsdtSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) error {
 	load := args.Load
 	data := &program.MultiUprobeAttachData{}
-	data.Attach = make(map[string]*program.MultiUprobeAttachSymbolsCookies)
+	data.Attach = make(map[*os.File]*program.MultiUprobeAttachSymbolsCookies)
 
 	for index, id := range ids {
 		usdtEntry, err := genericUsdtTableGet(id)
@@ -612,7 +648,7 @@ func loadMultiUsdtSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) erro
 
 		load.MapLoad = append(load.MapLoad, selectorsMaploads(usdtEntry.selectors, uint32(index))...)
 
-		attach, ok := data.Attach[usdtEntry.path]
+		attach, ok := data.Attach[usdtEntry.file]
 		if !ok {
 			attach = &program.MultiUprobeAttachSymbolsCookies{}
 		}
@@ -621,7 +657,7 @@ func loadMultiUsdtSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) erro
 		attach.RefCtrOffsets = append(attach.RefCtrOffsets, usdtEntry.target.SemaOff)
 		attach.Cookies = append(attach.Cookies, uint64(index))
 
-		data.Attach[usdtEntry.path] = attach
+		data.Attach[usdtEntry.file] = attach
 	}
 
 	load.SetAttachData(data)
@@ -652,7 +688,7 @@ func handleGenericUsdt(r *bytes.Reader) ([]observer.Event, error) {
 
 	unix := &tracing.MsgGenericUsdtUnix{}
 	unix.Msg = &m
-	unix.Path = uprobeUsdt.path
+	unix.Path = uprobeUsdt.file.Name()
 	unix.Provider = uprobeUsdt.target.Spec.Provider
 	unix.Name = uprobeUsdt.target.Spec.Name
 	unix.PolicyName = uprobeUsdt.policyName

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -62,7 +63,7 @@ type uprobeLoadArgs struct {
 type genericUprobe struct {
 	loadArgs     uprobeLoadArgs
 	tableId      idtable.EntryID
-	path         string
+	file         *os.File
 	symbol       string
 	address      uint64
 	refCtrOffset uint64
@@ -101,7 +102,8 @@ func (g *genericUprobe) SetID(id idtable.EntryID) {
 func (g *genericUprobe) LogAttrs(level slog.Level, msg string, attrs ...slog.Attr) {
 	attrs = append(attrs,
 		slog.Attr{Key: "policy_name", Value: slog.StringValue(g.policyName)},
-		slog.Attr{Key: "path", Value: slog.StringValue(g.path)},
+		slog.Attr{Key: "path", Value: slog.StringValue(g.file.Name())},
+
 		slog.Attr{Key: "symbol", Value: slog.StringValue(g.symbol)},
 		slog.Attr{Key: "address", Value: slog.Uint64Value(g.address)},
 	)
@@ -144,7 +146,7 @@ func handleGenericUprobe(r *bytes.Reader) ([]observer.Event, error) {
 
 	unix := &tracing.MsgGenericUprobeUnix{}
 	unix.Msg = &m
-	unix.Path = uprobeEntry.path
+	unix.Path = uprobeEntry.file.Name()
 	unix.Symbol = uprobeEntry.symbol
 	unix.Offset = uprobeEntry.address
 	unix.RefCtrOffset = uprobeEntry.refCtrOffset
@@ -250,7 +252,7 @@ func loadSingleUprobeSensor(uprobeEntry *genericUprobe, args sensors.LoadProbeAr
 
 	symbol, offset := resolveSymbol(uprobeEntry.symbol)
 	attachData := &program.UprobeAttachData{
-		Path:         uprobeEntry.path,
+		File:         uprobeEntry.file,
 		Symbol:       symbol,
 		Offset:       offset,
 		Address:      uprobeEntry.address,
@@ -262,7 +264,7 @@ func loadSingleUprobeSensor(uprobeEntry *genericUprobe, args sensors.LoadProbeAr
 		return err
 	}
 
-	logger.GetLogger().Info(fmt.Sprintf("Loaded generic uprobe program: %s -> %s [%s]", args.Load.Name, uprobeEntry.path, uprobeEntry.symbol))
+	logger.GetLogger().Info(fmt.Sprintf("Loaded generic uprobe program: %s -> %s [%s]", args.Load.Name, uprobeEntry.file.Name(), uprobeEntry.symbol))
 	return nil
 }
 
@@ -309,7 +311,7 @@ func parseSymbol(sym string) (string, uint64, error) {
 func loadMultiUprobeSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) error {
 	load := args.Load
 	data := &program.MultiUprobeAttachData{}
-	data.Attach = make(map[string]*program.MultiUprobeAttachSymbolsCookies)
+	data.Attach = make(map[*os.File]*program.MultiUprobeAttachSymbolsCookies)
 
 	for index, id := range ids {
 		uprobeEntry, err := genericUprobeTableGet(id)
@@ -365,7 +367,7 @@ func loadMultiUprobeSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) er
 
 		load.MapLoad = append(load.MapLoad, mapLoad...)
 
-		attach, ok := data.Attach[uprobeEntry.path]
+		attach, ok := data.Attach[uprobeEntry.file]
 		if !ok {
 			attach = &program.MultiUprobeAttachSymbolsCookies{}
 		}
@@ -384,7 +386,7 @@ func loadMultiUprobeSensor(ids []idtable.EntryID, args sensors.LoadProbeArgs) er
 
 		attach.Cookies = append(attach.Cookies, uint64(index))
 
-		data.Attach[uprobeEntry.path] = attach
+		data.Attach[uprobeEntry.file] = attach
 	}
 
 	load.SetAttachData(data)
@@ -438,6 +440,10 @@ func cleanupUprobeEntries(ids []idtable.EntryID) error {
 			errs = errors.Join(errs, err)
 		}
 
+		if err = uprobeEntry.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			errs = errors.Join(errs, err)
+		}
+
 		_, err = uprobeTable.RemoveEntry(id)
 		if err != nil {
 			errs = errors.Join(errs, err)
@@ -458,6 +464,7 @@ func createGenericUprobeSensor(
 	var err error
 	var has uprobeHas
 	var celExprs *selectors.CelExprFunctions
+	openedFiles := make(map[string]*os.File)
 
 	// use multi uprobe only if:
 	// - it's not disabled by spec option
@@ -481,15 +488,31 @@ func createGenericUprobeSensor(
 		if err = appendMacrosSelectors(uprobe.Selectors, spec.SelectorsMacros); err != nil {
 			err = fmt.Errorf("append macros selectors: %w", err)
 			if cleanupErr := cleanupUprobeEntries(ids); cleanupErr != nil {
-				return nil, errors.Join(err, cleanupErr)
+				err = errors.Join(err, cleanupErr)
 			}
 			return nil, err
 		}
 
-		nextIDs, addErr := addUprobe(&uprobe, ids, &in, &has)
+		entryFile, ok := openedFiles[uprobe.Path]
+		if !ok {
+			entryFile, err = os.Open(uprobe.Path)
+			if err != nil {
+				if cleanupErr := cleanupUprobeEntries(ids); cleanupErr != nil {
+					err = errors.Join(err, cleanupErr)
+				}
+				return nil, err
+			}
+			openedFiles[uprobe.Path] = entryFile
+		}
+
+		nextIDs, addErr := addUprobe(&uprobe, entryFile, ids, &in, &has)
 		if addErr != nil {
 			if cleanupErr := cleanupUprobeEntries(ids); cleanupErr != nil {
-				return nil, errors.Join(addErr, cleanupErr)
+				addErr = errors.Join(addErr, cleanupErr)
+			}
+
+			if err := entryFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				addErr = errors.Join(addErr, err)
 			}
 			return nil, addErr
 		}
@@ -504,7 +527,7 @@ func createGenericUprobeSensor(
 
 	if err != nil {
 		if cleanupErr := cleanupUprobeEntries(ids); cleanupErr != nil {
-			return nil, errors.Join(err, cleanupErr)
+			err = errors.Join(err, cleanupErr)
 		}
 		return nil, err
 	}
@@ -527,10 +550,24 @@ func createGenericUprobeSensor(
 		DestroyHook: func() error {
 			return cleanupUprobeEntries(ids)
 		},
+		PostLoadHook: func() error {
+			var errs error
+			for _, id := range ids {
+				uprobeEntry, err := genericUprobeTableGet(id)
+				if err != nil {
+					errs = errors.Join(errs, err)
+					continue
+				}
+				if err = uprobeEntry.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+					errs = errors.Join(errs, fmt.Errorf("problem closing path %q: %w", uprobeEntry.file.Name(), err))
+				}
+			}
+			return errs
+		},
 	}, nil
 }
 
-func addUprobe(spec *v1alpha1.UProbeSpec, ids []idtable.EntryID, in *addUprobeIn, has *uprobeHas) (retIDs []idtable.EntryID, retErr error) {
+func addUprobe(spec *v1alpha1.UProbeSpec, entryFile *os.File, ids []idtable.EntryID, in *addUprobeIn, has *uprobeHas) (retIDs []idtable.EntryID, retErr error) {
 	var argRetprobe *v1alpha1.KProbeArg
 	var argRetprobeIdx int
 	var setRetprobe bool
@@ -839,7 +876,7 @@ func addUprobe(spec *v1alpha1.UProbeSpec, ids []idtable.EntryID, in *addUprobeIn
 				},
 			},
 			tableId:           idtable.UninitializedEntryID,
-			path:              spec.Path,
+			file:              entryFile,
 			symbol:            sym,
 			address:           offset,
 			refCtrOffset:      refCtrOffset,
@@ -865,11 +902,10 @@ func addUprobe(spec *v1alpha1.UProbeSpec, ids []idtable.EntryID, in *addUprobeIn
 		return nil
 	}
 
-	f, err := elf.OpenSafeELFFile(spec.Path)
+	f, err := elf.NewSafeELFFile(entryFile)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
 	if symbols != 0 && f.IsStrippedPureGoBinary() {
 		tbl, err := f.Pclntab()
@@ -938,6 +974,7 @@ func createMultiUprobeSensor(polInfo *policyInfo, sensorPath string, multiIDs []
 		if err != nil {
 			return nil, nil, err
 		}
+
 		if gu.loadArgs.retprobe {
 			multiRetIDs = append(multiRetIDs, id)
 		}
@@ -1062,7 +1099,7 @@ func createUprobeSensorFromEntry(polInfo *policyInfo, uprobeEntry *genericUprobe
 	pinSymbol := strings.ReplaceAll(uprobeEntry.symbol, ".", "_")
 	load := program.Builder(
 		path.Join(option.Config.HubbleLib, loadProgName),
-		fmt.Sprintf("%s %s", uprobeEntry.path, uprobeEntry.symbol),
+		fmt.Sprintf("%s %s", uprobeEntry.file.Name(), uprobeEntry.symbol),
 		"uprobe/generic_uprobe",
 		fmt.Sprintf("%d-%s", uprobeEntry.tableId.ID, pinSymbol),
 		"generic_uprobe").
@@ -1111,13 +1148,14 @@ func createUprobeSensorFromEntry(polInfo *policyInfo, uprobeEntry *genericUprobe
 		pinRetProg := fmt.Sprintf("%d-%s_return", uprobeEntry.tableId.ID, pinSymbol)
 		loadret := program.Builder(
 			path.Join(option.Config.HubbleLib, loadProgRetName),
-			fmt.Sprintf("%s %s", uprobeEntry.path, uprobeEntry.symbol),
+			fmt.Sprintf("%s %s", uprobeEntry.file.Name(), uprobeEntry.symbol),
 			"uprobe/generic_retuprobe",
 			pinRetProg,
 			"generic_uprobe").
 			SetRetProbe(true).
 			SetLoaderData(uprobeEntry).
 			SetPolicy(uprobeEntry.policyName)
+
 		progs = append(progs, loadret)
 
 		retProbe := program.MapBuilderSensor("retprobe_map", loadret)
