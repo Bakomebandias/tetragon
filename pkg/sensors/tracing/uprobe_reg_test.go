@@ -825,10 +825,6 @@ func testUprobePtRegsPreload(t *testing.T, multi bool) {
 		t.Skip("skipping")
 	}
 
-	if runtime.GOARCH == "arm64" {
-		t.Skip("skipping, x86_64 only test")
-	}
-
 	testBinary := testutils.RepoRootPath("contrib/tester-progs/regs-override")
 
 	disableUprobeMulti := ""
@@ -840,22 +836,13 @@ func testUprobePtRegsPreload(t *testing.T, multi bool) {
       value: "1"`
 	}
 
-	// Put uprobe in test_3 function at:
-	//
-	//      static const char *test_3_string = "test_3_string_CASE";
-	//
-	//      "push   %%rbp\n"          /* +0  55                            */
-	//      "mov    %%rsp, %%rbp\n"   /* +1  48 89 e5                      */
-	//      "mov    %[str], %%rdi\n"  /* +4  48 8b 3d 96 2e 00 00          */
-	//      "pop    %%rbp\n"          /* +11 5d                            */
-	// -->  "mov    $0x0,%%rax\n"     /* +12 48 c7 c0 00 00 00 00          */
-	//      "mov    $0xff,%%rax\n"    /* +19 48 c7 c0 ff 00 00 00          */
-	//      "ret\n"                   /* +26 c3                            */
-	//      :
-	//      : [str] "m" (test_3_string)
-	//
-	// Make sure we retrieve data with eax value (1) as int argument
-	// and match the expected value via matchData.
+	// Attach where the test_3 string pointer is still in a register (rdi on
+	// x86_64, x1 on arm64) and match the preloaded string. See test_3 in
+	// contrib/tester-progs/regs-override.c for the per-arch layout.
+	symbol, resolveReg := "test_3+12", "rdi"
+	if runtime.GOARCH == "arm64" {
+		symbol, resolveReg = "test_3+8", "x1"
+	}
 
 	pathHook := `
 apiVersion: cilium.io/v1alpha1
@@ -866,12 +853,12 @@ spec: ` + disableUprobeMulti + `
   uprobes:
   - path: "` + testBinary + `"
     symbols:
-    - "test_3+12"
+    - "` + symbol + `"
     data:
     - index: 0
       type: "string"
       source: "pt_regs"
-      resolve: "rdi"
+      resolve: "` + resolveReg + `"
 `
 
 	createCrdFile(t, pathHook)
@@ -879,7 +866,7 @@ spec: ` + disableUprobeMulti + `
 	upChecker := ec.NewProcessUprobeChecker("UPROBE_DATA_MATCH").
 		WithProcess(ec.NewProcessChecker().
 			WithBinary(sm.Full(testBinary))).
-		WithSymbol(sm.Full("test_3+12")).
+		WithSymbol(sm.Full(symbol)).
 		WithData(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
@@ -926,10 +913,6 @@ func testUprobePtRegsPreloadDouble(t *testing.T, multi bool) {
 		t.Skip("skipping")
 	}
 
-	if runtime.GOARCH == "arm64" {
-		t.Skip("skipping, x86_64 only test")
-	}
-
 	testBinary := testutils.RepoRootPath("contrib/tester-progs/regs-override")
 
 	disableUprobeMulti := ""
@@ -941,26 +924,12 @@ func testUprobePtRegsPreloadDouble(t *testing.T, multi bool) {
       value: "1"`
 	}
 
-	// Put uprobe in test_3 function at:
-	//
-	//      static const char *test_3_string = "test_3_string_CASE";
-	//
-	//      "push   %%rbp\n"          /* +0  55                            */
-	//      "mov    %%rsp, %%rbp\n"   /* +1  48 89 e5                      */
-	//      "mov    %[str], %%rdi\n"  /* +4  48 8b 3d 96 2e 00 00          */
-	//      "pop    %%rbp\n"          /* +11 5d                            */
-	// -->  "mov    $0x0,%%rax\n"     /* +12 48 c7 c0 00 00 00 00          */
-	//      "mov    $0xff,%%rax\n"    /* +19 48 c7 c0 ff 00 00 00          */
-	//      "ret\n"                   /* +26 c3                            */
-	//      :
-	//      : [str] "m" (test_3_string)
-	//
-	// Make sure we retrieve data with eax value (1) as int argument
-	// and match the expected value via matchData.
-	//
-	// This test does the same thing as testUprobePtRegsPreload but instead
-	// of single uprobe with preload argument it adds two uprobes with preload
-	// argument.
+	// Same as testUprobePtRegsPreload but with two preload uprobes instead of
+	// one. See test_3 in contrib/tester-progs/regs-override.c for the layout.
+	symbol, resolveReg := "test_3+12", "rdi"
+	if runtime.GOARCH == "arm64" {
+		symbol, resolveReg = "test_3+8", "x1"
+	}
 
 	pathHook := `
 apiVersion: cilium.io/v1alpha1
@@ -971,20 +940,20 @@ spec: ` + disableUprobeMulti + `
   uprobes:
   - path: "` + testBinary + `"
     symbols:
-    - "test_3+12"
+    - "` + symbol + `"
     data:
     - index: 0
       type: "string"
       source: "pt_regs"
-      resolve: "rdi"
+      resolve: "` + resolveReg + `"
   - path: "` + testBinary + `"
     symbols:
-    - "test_3+12"
+    - "` + symbol + `"
     data:
     - index: 0
       type: "string"
       source: "pt_regs"
-      resolve: "rdi"
+      resolve: "` + resolveReg + `"
 `
 
 	createCrdFile(t, pathHook)
@@ -992,7 +961,7 @@ spec: ` + disableUprobeMulti + `
 	upChecker := ec.NewProcessUprobeChecker("UPROBE_DATA_MATCH").
 		WithProcess(ec.NewProcessChecker().
 			WithBinary(sm.Full(testBinary))).
-		WithSymbol(sm.Full("test_3+12")).
+		WithSymbol(sm.Full(symbol)).
 		WithData(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
@@ -1046,9 +1015,6 @@ func testUprobePtRegsPreloadSubstring(t *testing.T, str string, ignoreCase bool,
 	if !single && !bpf.HasUprobeMulti() {
 		t.Skip("skipping, can't use uprobe multi, no kernel support")
 	}
-	if runtime.GOARCH == "arm64" {
-		t.Skip("skipping, x86_64 only test")
-	}
 
 	testBinary := testutils.RepoRootPath("contrib/tester-progs/regs-override")
 
@@ -1064,22 +1030,13 @@ func testUprobePtRegsPreloadSubstring(t *testing.T, str string, ignoreCase bool,
     value: "1"`
 	}
 
-	// Put uprobe in test_3 function at:
-	//
-	//      static const char *test_3_string = "test_3_string";
-	//
-	//      "push   %%rbp\n"          /* +0  55                            */
-	//      "mov    %%rsp, %%rbp\n"   /* +1  48 89 e5                      */
-	//      "mov    %[str], %%rdi\n"  /* +4  48 8b 3d 96 2e 00 00          */
-	//      "pop    %%rbp\n"          /* +11 5d                            */
-	// -->  "mov    $0x0,%%rax\n"     /* +12 48 c7 c0 00 00 00 00          */
-	//      "mov    $0xff,%%rax\n"    /* +19 48 c7 c0 ff 00 00 00          */
-	//      "ret\n"                   /* +26 c3                            */
-	//      :
-	//      : [str] "m" (test_3_string)
-	//
-	// Make sure we retrieve data with eax value (1) as int argument
-	// and match the expected value via matchData.
+	// Attach where the test_3 string pointer is still in a register (rdi on
+	// x86_64, x1 on arm64) and match a substring of it. See test_3 in
+	// contrib/tester-progs/regs-override.c for the per-arch layout.
+	symbol, resolveReg := "test_3+12", "rdi"
+	if runtime.GOARCH == "arm64" {
+		symbol, resolveReg = "test_3+8", "x1"
+	}
 
 	pathHook := `
 apiVersion: cilium.io/v1alpha1
@@ -1091,12 +1048,12 @@ spec:
   uprobes:
   - path: "` + testBinary + `"
     symbols:
-    - "test_3+12"
+    - "` + symbol + `"
     data:
     - index: 0
       type: "string"
       source: "pt_regs"
-      resolve: "rdi"
+      resolve: "` + resolveReg + `"
     selectors:
     - matchData:
       - index: 0
@@ -1110,7 +1067,7 @@ spec:
 	upChecker := ec.NewProcessUprobeChecker("UPROBE_DATA_MATCH").
 		WithProcess(ec.NewProcessChecker().
 			WithBinary(sm.Full(testBinary))).
-		WithSymbol(sm.Full("test_3+12")).
+		WithSymbol(sm.Full(symbol)).
 		WithData(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
@@ -1232,28 +1189,17 @@ func testUprobePtRegsPreloadSubstringOverride(t *testing.T, single bool) {
 	if !bpf.HasKfunc("bpf_strnstr") {
 		t.Skip("skipping, no bpf_strnstr kfunc in kernel")
 	}
-	if runtime.GOARCH == "arm64" {
-		t.Skip("skipping, x86_64 only test")
-	}
 
 	testBinary := testutils.RepoRootPath("contrib/tester-progs/regs-override")
 
-	// Put uprobe in test_3 function at:
-	//
-	//      static const char *test_3_string = "test_3_string";
-	//
-	//      "push   %%rbp\n"          /* +0  55                            */
-	//      "mov    %%rsp, %%rbp\n"   /* +1  48 89 e5                      */
-	//      "mov    %[str], %%rdi\n"  /* +4  48 8b 3d 96 2e 00 00          */
-	//      "pop    %%rbp\n"          /* +11 5d                            */
-	//      "mov    $0x0,%%rax\n"     /* +12 48 c7 c0 00 00 00 00          */
-	// -->  "mov    $0xff,%%rax\n"    /* +19 48 c7 c0 ff 00 00 00          */
-	//      "ret\n"                   /* +26 c3                            */
-	//      :
-	//      : [str] "m" (test_3_string)
-	//
-	// Make sure we retrieve data with eax value (1) as int argument
-	// and match the expected value via matchData.
+	// Attach on the instruction that sets the 0xff return value and override
+	// the program counter to skip it, so test_3 returns 0. The string pointer
+	// is still in a register (rdi on x86_64, x1 on arm64) for matchData.
+	// x86_64 skips a 7-byte mov (rip+=7); arm64 a 4-byte mov (pc+=4).
+	symbol, resolveReg, overrideReg := "test_3+19", "rdi", "rip=7%rip"
+	if runtime.GOARCH == "arm64" {
+		symbol, resolveReg, overrideReg = "test_3+12", "x1", "pc=4%pc"
+	}
 
 	options := ""
 	if single {
@@ -1272,12 +1218,12 @@ spec:
   uprobes:
   - path: "` + testBinary + `"
     symbols:
-    - "test_3+19"
+    - "` + symbol + `"
     data:
     - index: 0
       type: "string"
       source: "pt_regs"
-      resolve: "rdi"
+      resolve: "` + resolveReg + `"
     selectors:
     - matchData:
       - index: 0
@@ -1287,7 +1233,7 @@ spec:
       matchActions:
       - action: Override
         argRegs:
-        - "rip=7%rip"
+        - "` + overrideReg + `"
 `
 
 	createCrdFile(t, pathHook)
@@ -1295,7 +1241,7 @@ spec:
 	upChecker := ec.NewProcessUprobeChecker("UPROBE_DATA_MATCH").
 		WithProcess(ec.NewProcessChecker().
 			WithBinary(sm.Full(testBinary))).
-		WithSymbol(sm.Full("test_3+19")).
+		WithSymbol(sm.Full(symbol)).
 		WithData(ec.NewKprobeArgumentListMatcher().
 			WithOperator(lc.Ordered).
 			WithValues(
