@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	PolicyStatsMapName = "policy_stats"
+	PolicyStatsMapName         = "policy_stats"
+	PolicySelectorStatsMapName = "selector_stats"
 )
 
 type PolicyAction uint8
@@ -31,7 +32,8 @@ const (
 	PolicyMonitorNotifyEnforcer PolicyAction = 7
 	PolicySet                   PolicyAction = 8
 	PolicyMonitorSet            PolicyAction = 9
-	PolicyActionsNr                          = 10
+	PolicyNoPost                PolicyAction = 10
+	PolicyActionsNr                          = 11
 )
 
 type PolicyStats struct {
@@ -39,6 +41,10 @@ type PolicyStats struct {
 }
 
 func StatsFromBPFMap(fname string) (*PolicyStats, error) {
+	return StatsFromBPFMapAtKey(fname, 0)
+}
+
+func StatsFromBPFMapAtKey(fname string, key uint32) (*PolicyStats, error) {
 	m, err := ebpf.LoadPinnedMap(fname, &ebpf.LoadPinOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open bpf map %s: %w", fname, err)
@@ -46,13 +52,49 @@ func StatsFromBPFMap(fname string) (*PolicyStats, error) {
 	defer m.Close()
 
 	var ret PolicyStats
-	if err = m.Lookup(new(uint32(0)), &ret); err != nil {
+	if err = m.Lookup(&key, &ret); err != nil {
 		return nil, fmt.Errorf("lookup failed: %w", err)
 	}
 	return &ret, nil
 }
 
+func StatsFromBPFMapRange(fname string) ([]*PolicyStats, error) {
+	m, err := ebpf.LoadPinnedMap(fname, &ebpf.LoadPinOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open bpf map %s: %w", fname, err)
+	}
+	defer m.Close()
+
+	count := m.MaxEntries()
+	ret := make([]*PolicyStats, 0, count)
+	for key := range count {
+		var stats PolicyStats
+		if err = m.Lookup(&key, &stats); err != nil {
+			return nil, fmt.Errorf("lookup failed: %w", err)
+		}
+		ret = append(ret, &stats)
+	}
+	return ret, nil
+}
+
+func (s *PolicyStats) Empty() bool {
+	if s == nil {
+		return true
+	}
+	for _, cnt := range s.ActionsCount {
+		if cnt != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func GetPolicyStats(tp tracingpolicy.TracingPolicy) (*PolicyStats, error) {
 	fname := filepath.Join(bpf.MapPrefixPath(), tracingpolicy.PolicyDir(tp.TpNamespace(), tp.TpName()), PolicyStatsMapName)
 	return StatsFromBPFMap(fname)
+}
+
+func GetPolicySelectorStats(tp tracingpolicy.TracingPolicy) ([]*PolicyStats, error) {
+	fname := filepath.Join(bpf.MapPrefixPath(), tracingpolicy.PolicyDir(tp.TpNamespace(), tp.TpName()), PolicySelectorStatsMapName)
+	return StatsFromBPFMapRange(fname)
 }

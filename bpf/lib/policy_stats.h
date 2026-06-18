@@ -34,6 +34,7 @@ enum policy_actions {
 	POLICY_MONITOR_NOTIFY_ENFORCER = 7, /* policy did not notify the enforcer because it was in monitor mode */
 	POLICY_SET = 8, /* policy set user-space values */
 	POLICY_MONITOR_SET = 9, /* policy did not set user-space values because it was in monitor mode */
+	POLICY_NOPOST = 10, /* policy suppressed an event */
 	POLICY_NACTIONS_,
 };
 
@@ -49,6 +50,13 @@ struct {
 	__type(value, struct policy_stats);
 } policy_stats SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct policy_stats);
+} selector_stats SEC(".maps");
+
 FUNC_INLINE void
 policy_stats_update(int act)
 {
@@ -59,9 +67,24 @@ policy_stats_update(int act)
 	if (pstats)
 		lock_add(&pstats->act_cnt[act], 1);
 }
+
+FUNC_INLINE void
+policy_selector_stats_update(int act, __u32 selector_stats_id)
+{
+	struct policy_stats *pstats;
+
+	pstats = map_lookup_elem(&selector_stats, &selector_stats_id);
+	if (pstats)
+		lock_add(&pstats->act_cnt[act], 1);
+}
 #else
 FUNC_INLINE void
 policy_stats_update(int acct)
+{
+}
+
+FUNC_INLINE void
+policy_selector_stats_update(int act, __u32 selector_stats_id)
 {
 }
 #endif
