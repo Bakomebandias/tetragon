@@ -2477,6 +2477,7 @@ Determines the behavior of a field filter
 | hook | [string](#string) |  | hook is the policy hook that owns the selector |
 | selector_index | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  | selector_index is the selector index within the hook |
 | action_counters | [TracingPolicyActionCounters](#tetragon-TracingPolicyActionCounters) |  | action counters for the selector |
+| selector_label | [string](#string) |  | selector_label is an optional user-provided selector label |
 
 
 
