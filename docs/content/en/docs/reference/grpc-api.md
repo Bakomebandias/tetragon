@@ -1481,6 +1481,16 @@ Determines the behavior of a field filter
 | set | [uint64](#uint64) |  | number of set actions triggered from the policy |
 | monitor_set | [uint64](#uint64) |  | number of set actions that did not occur because the policy was in monitor mode |
 
+<a name="tetragon-TracingPolicySelectorActionCounters"></a>
+
+### TracingPolicySelectorActionCounters
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| hook | [string](#string) |  | hook is the policy hook that owns the selector |
+| selector_index | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  | selector_index is the selector index within the hook |
+| action_counters | [TracingPolicyActionCounters](#tetragon-TracingPolicyActionCounters) |  | action counters for the selector |
+
 <a name="tetragon-TracingPolicyStats"></a>
 
 ### TracingPolicyStats
@@ -1488,6 +1498,7 @@ Determines the behavior of a field filter
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | action_counters | [TracingPolicyActionCounters](#tetragon-TracingPolicyActionCounters) |  |  |
+| selector_action_counters | [TracingPolicySelectorActionCounters](#tetragon-TracingPolicySelectorActionCounters) | repeated |  |
 
 <a name="tetragon-TracingPolicyStatus"></a>
 
