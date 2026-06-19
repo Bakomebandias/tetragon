@@ -108,6 +108,7 @@ type collection struct {
 type selectorStatsMetadata struct {
 	hook          string
 	selectorIndex uint32
+	selectorLabel string
 }
 
 type collectionMap struct {
@@ -219,6 +220,7 @@ func (c *collection) selectorActionCounters() []*tetragon.TracingPolicySelectorA
 		ret = append(ret, &tetragon.TracingPolicySelectorActionCounters{
 			Hook:           meta.hook,
 			SelectorIndex:  wrapperspb.UInt32(selectorIndex),
+			SelectorLabel:  meta.selectorLabel,
 			ActionCounters: actionCountersFromStats(stats[i]),
 		})
 	}
@@ -257,6 +259,7 @@ func appendSelectorStatsMetadata(ret []selectorStatsMetadata, hook string, selec
 		ret = append(ret, selectorStatsMetadata{
 			hook:          hook,
 			selectorIndex: uint32(i),
+			selectorLabel: selectors[i].Label,
 		})
 	}
 	return ret
