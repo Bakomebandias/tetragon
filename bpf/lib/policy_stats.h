@@ -50,6 +50,13 @@ struct {
 	__type(value, struct policy_stats);
 } policy_stats SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct policy_stats);
+} selector_stats SEC(".maps");
+
 FUNC_INLINE void
 policy_stats_update(int act)
 {
@@ -60,9 +67,24 @@ policy_stats_update(int act)
 	if (pstats)
 		lock_add(&pstats->act_cnt[act], 1);
 }
+
+FUNC_INLINE void
+policy_selector_stats_update(int act, __u32 selector_stats_id)
+{
+	struct policy_stats *pstats;
+
+	pstats = map_lookup_elem(&selector_stats, &selector_stats_id);
+	if (pstats)
+		lock_add(&pstats->act_cnt[act], 1);
+}
 #else
 FUNC_INLINE void
 policy_stats_update(int acct)
+{
+}
+
+FUNC_INLINE void
+policy_selector_stats_update(int act, __u32 selector_stats_id)
 {
 }
 #endif
